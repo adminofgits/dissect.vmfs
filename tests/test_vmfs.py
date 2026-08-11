@@ -3,11 +3,12 @@ from __future__ import annotations
 import contextlib
 import gzip
 import stat
+from types import SimpleNamespace
 
 import pytest
 
 from dissect.vmfs import lvm, vmfs
-from dissect.vmfs.c_vmfs import FS3_Config, FS3_ZeroLevelAddrType, FS6_DirBlockType, c_vmfs
+from dissect.vmfs.c_vmfs import FS3_Config, FS3_ResourceTypeID, FS3_ZeroLevelAddrType, FS6_DirBlockType, c_vmfs
 from dissect.vmfs.descriptor import _dir_hash_get_location, _dir_name_hash
 from dissect.vmfs.exception import VolumeNotAvailableError
 from tests.conftest import absolute_path
@@ -221,6 +222,36 @@ def test_vmfs_jbosf() -> None:
 
         fd = fs.get(donor.get("small").address)
         assert fd.open().read() == b"tiny\n"
+
+
+def test_vmfs6_opens_sub_blocks_before_file_blocks() -> None:
+    """Test that VMFS6 can resolve an indirect .fbb.sf pointer through .sbc.sf."""
+
+    class Resources:
+        def __init__(self) -> None:
+            self.opened = []
+            self.LFB = None
+
+        def has(self, resource_type: FS3_ResourceTypeID) -> bool:
+            return resource_type in self.opened
+
+        def open(self, resource_type: FS3_ResourceTypeID, **kwargs) -> None:
+            if resource_type == FS3_ResourceTypeID.LARGE_FILE_BLOCK:
+                assert FS3_ResourceTypeID.SUB_BLOCK in self.opened
+                self.LFB = SimpleNamespace(metadata=SimpleNamespace(childMetaOffset=0))
+            self.opened.append(resource_type)
+
+    fs = vmfs.VMFS.__new__(vmfs.VMFS)
+    fs.major_version = c_vmfs.FS3_VMFS6_MAJOR_VERSION
+    fs.fh = None
+    fs.resources = Resources()
+
+    system_files = [object() for _ in range(6)]
+    fs._open_resources(*system_files)
+
+    assert fs.resources.opened.index(FS3_ResourceTypeID.SUB_BLOCK) < fs.resources.opened.index(
+        FS3_ResourceTypeID.LARGE_FILE_BLOCK
+    )
 
 
 def _assert_is_file(fd: vmfs.FileDescriptor, size: int, zla: FS3_ZeroLevelAddrType) -> None:

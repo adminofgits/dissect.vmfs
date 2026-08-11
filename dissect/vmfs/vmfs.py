@@ -205,6 +205,17 @@ class VMFS:
             elif self.fh:
                 self.resources.open(FS3_ResourceTypeID.PTR_BLOCK, address=c_vmfs.pbcDescAddr)
 
+        # .sbc.sf - sub-block cluster.system file
+        #
+        # Pointer-block data may itself be stored in a sub-block.  Open the
+        # sub-block resource before the file-block bitmap, because large VMFS6
+        # volumes can require such an indirect pointer while opening .fbb.sf.
+        if not self.resources.has(FS3_ResourceTypeID.SUB_BLOCK):
+            if sbc:
+                self.resources.open(FS3_ResourceTypeID.SUB_BLOCK, fileobj=sbc)
+            elif self.fh:
+                self.resources.open(FS3_ResourceTypeID.SUB_BLOCK, address=c_vmfs.sbDescAddr)
+
         # .fbb.sf - file block bitmap(?).system file
         # Contains allocation information for file blocks.
         # On VMFS6, contains the large file block (LFB) bitmap, and the small file block (SFB) information is stored as
@@ -240,16 +251,6 @@ class VMFS:
                 self.resources.open(FS3_ResourceTypeID.FILE_DESC, fileobj=fdc)
             elif self.fh:
                 self.resources.open(FS3_ResourceTypeID.FILE_DESC, address=c_vmfs.fdbcDescAddr)
-
-        # .sbc.sf - sub-block cluster.system file
-        # Contains sub-block data. Data that's too large to be resident, but too small for a full file block.
-        # A lot of directory data is stored in sub-blocks, which is beneficial when we only have system files
-        # to work with.
-        if not self.resources.has(FS3_ResourceTypeID.SUB_BLOCK):
-            if sbc:
-                self.resources.open(FS3_ResourceTypeID.SUB_BLOCK, fileobj=sbc)
-            elif self.fh:
-                self.resources.open(FS3_ResourceTypeID.SUB_BLOCK, address=c_vmfs.sbDescAddr)
 
         # .jbc.sf - journal block cluster.system file
         # Unexplored territory, for now.
