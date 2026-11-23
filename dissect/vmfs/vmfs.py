@@ -206,10 +206,12 @@ class VMFS:
                 self.resources.open(FS3_ResourceTypeID.PTR_BLOCK, address=c_vmfs.pbcDescAddr)
 
         # .sbc.sf - sub-block cluster.system file
+        # Contains sub-block data. Data that's too large to be resident, but too small for a full file block.
+        # A lot of directory data is stored in sub-blocks, which is beneficial when we only have system files
+        # to work with.
         #
-        # Pointer-block data may itself be stored in a sub-block.  Open the
-        # sub-block resource before the file-block bitmap, because large VMFS6
-        # volumes can require such an indirect pointer while opening .fbb.sf.
+        # This is opened before .fbb.sf because pointer-block data may itself be stored in a sub-block, and large
+        # VMFS6 volumes can require such an indirect pointer while opening the file block bitmap.
         if not self.resources.has(FS3_ResourceTypeID.SUB_BLOCK):
             if sbc:
                 self.resources.open(FS3_ResourceTypeID.SUB_BLOCK, fileobj=sbc)
