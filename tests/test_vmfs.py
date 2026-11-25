@@ -3,14 +3,15 @@ from __future__ import annotations
 import contextlib
 import gzip
 import stat
-from types import SimpleNamespace
 
 import pytest
+from dissect.util.stream import OverlayStream
 
 from dissect.vmfs import lvm, vmfs
-from dissect.vmfs.c_vmfs import FS3_Config, FS3_ResourceTypeID, FS3_ZeroLevelAddrType, FS6_DirBlockType, c_vmfs
+from dissect.vmfs.c_vmfs import FS3_Config, FS3_ZeroLevelAddrType, FS6_DirBlockType, c_vmfs
 from dissect.vmfs.descriptor import _dir_hash_get_location, _dir_name_hash
 from dissect.vmfs.exception import VolumeNotAvailableError
+from dissect.vmfs.vmfs import _get_sfd_offset
 from tests.conftest import absolute_path
 
 
@@ -224,34 +225,34 @@ def test_vmfs_jbosf() -> None:
         assert fd.open().read() == b"tiny\n"
 
 
-def test_vmfs6_opens_sub_blocks_before_file_blocks() -> None:
-    """Test that VMFS6 can resolve an indirect .fbb.sf pointer through .sbc.sf."""
+def test_vmfs6_fbb_pointer_block_in_sub_block() -> None:
+    """Test opening a VMFS6 volume where ``.fbb.sf`` uses a pointer block that is stored in a sub-block."""
+    with gzip.open(absolute_path("_data/vmfs/vmfs6.bin.gz"), "rb") as fh:
+        volume = lvm.LVM(fh).volumes[0].open()
+        donor = vmfs.VMFS(volume)
 
-    class Resources:
-        def __init__(self) -> None:
-            self.opened = []
-            self.LFB = None
+        # Move the block array of .fbb.sf into a pointer block, stored in the sub-block of the "directory" directory
+        fbb = donor._get_sfd(c_vmfs.fbbDescAddr)
+        sb = donor.get("directory").blocks[0]
 
-        def has(self, resource_type: FS3_ResourceTypeID) -> bool:
-            return resource_type in self.opened
+        num_ptrs = donor.sub_block_size // 8
+        ptr_block = c_vmfs.uint64[num_ptrs].dumps(list(fbb.blocks) + [0] * (num_ptrs - len(fbb.blocks)))
 
-        def open(self, resource_type: FS3_ResourceTypeID, **kwargs) -> None:
-            if resource_type == FS3_ResourceTypeID.LARGE_FILE_BLOCK:
-                assert FS3_ResourceTypeID.SUB_BLOCK in self.opened
-                self.LFB = SimpleNamespace(metadata=SimpleNamespace(childMetaOffset=0))
-            self.opened.append(resource_type)
+        buf = bytearray(fbb.raw)
+        metadata = fbb.metadata
+        metadata.zeroLevelAddrType = FS3_ZeroLevelAddrType.POINTER_BLOCK
+        buf[donor._fd_meta_offset : donor._fd_meta_offset + len(metadata)] = bytes(metadata)
+        blocks = [sb] + [0] * (donor._fd_max_data_addrs - 1)
+        buf[donor._fd_data_addrs_offset :] = c_vmfs.uint64[donor._fd_max_data_addrs].dumps(blocks)
 
-    fs = vmfs.VMFS.__new__(vmfs.VMFS)
-    fs.major_version = c_vmfs.FS3_VMFS6_MAJOR_VERSION
-    fs.fh = None
-    fs.resources = Resources()
+        patched = OverlayStream(volume, volume.size)
+        patched.add(donor.resources.SB.resolve_address(sb), ptr_block)
+        patched.add(_get_sfd_offset(donor, c_vmfs.fbbDescAddr), bytes(buf))
+        fs = vmfs.VMFS(patched)
 
-    system_files = [object() for _ in range(6)]
-    fs._open_resources(*system_files)
-
-    assert fs.resources.opened.index(FS3_ResourceTypeID.SUB_BLOCK) < fs.resources.opened.index(
-        FS3_ResourceTypeID.LARGE_FILE_BLOCK
-    )
+        assert fs.get(".fbb.sf").zla == FS3_ZeroLevelAddrType.POINTER_BLOCK
+        assert bytes(fs.resources.LFB.metadata) == bytes(donor.resources.LFB.metadata)
+        assert bytes(fs.resources.SFB.metadata) == bytes(donor.resources.SFB.metadata)
 
 
 def _assert_is_file(fd: vmfs.FileDescriptor, size: int, zla: FS3_ZeroLevelAddrType) -> None:
